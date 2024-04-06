@@ -23,7 +23,7 @@ func TestWebsocket(t *testing.T) {
 	mux.HandleFunc("/ws", wsSrv.Handle)
 	httpSrv := httptest.NewServer(mux)
 	t.Cleanup(httpSrv.Close)
-	rc := NewReconnectingClient(strings.ReplaceAll(httpSrv.URL, "http://", "ws://") + "/ws")
+	rc := NewClient(strings.ReplaceAll(httpSrv.URL, "http://", "ws://") + "/ws")
 	err := rc.Write(TextMessage, []byte("hello world"))
 	if err != nil {
 		t.Fatal(err)

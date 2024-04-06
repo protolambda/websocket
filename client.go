@@ -32,10 +32,10 @@ func Dial(ctx context.Context, endpoint string) (*Connection, error) {
 	return setupConnection(conn), nil
 }
 
-// ReconnectingClient lazily connects to the configured endpoint on writes/reads when necessary,
+// Client lazily connects to the configured endpoint on writes/reads when necessary,
 // until the reconnecting-client is Close-ed.
 // The status of the current connection can be checked with Err().
-type ReconnectingClient struct {
+type Client struct {
 	reconnectCtx    context.Context // no reconnects will be attempted if ctx is closed
 	reconnectCancel context.CancelFunc
 
@@ -45,16 +45,16 @@ type ReconnectingClient struct {
 	conn     *Connection
 }
 
-func NewReconnectingClient(endpoint string) *ReconnectingClient {
+func NewClient(endpoint string) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &ReconnectingClient{
+	return &Client{
 		reconnectCtx:    ctx,
 		reconnectCancel: cancel,
 		endpoint:        endpoint,
 	}
 }
 
-func (rc *ReconnectingClient) Write(messageType MessageType, data []byte) error {
+func (rc *Client) Write(messageType MessageType, data []byte) error {
 	conn, err := rc.reconnectMaybe()
 	if err != nil {
 		return err
@@ -62,7 +62,7 @@ func (rc *ReconnectingClient) Write(messageType MessageType, data []byte) error 
 	return conn.Write(messageType, data)
 }
 
-func (rc *ReconnectingClient) Read() (messageType MessageType, p []byte, err error) {
+func (rc *Client) Read() (messageType MessageType, p []byte, err error) {
 	conn, err := rc.reconnectMaybe()
 	if err != nil {
 		return MessageType(0), nil, err
@@ -72,7 +72,7 @@ func (rc *ReconnectingClient) Read() (messageType MessageType, p []byte, err err
 
 var ErrNotReconnecting = errors.New("not reconnecting")
 
-func (rc *ReconnectingClient) reconnectMaybe() (*Connection, error) {
+func (rc *Client) reconnectMaybe() (*Connection, error) {
 	rc.connLock.Lock()
 	defer rc.connLock.Unlock()
 	if rc.conn == nil || rc.conn.CloseCtx().Err() != nil {
@@ -98,7 +98,7 @@ var ErrNotConnected = errors.New("not connected")
 // It returns context.Canceled if the Reconnecting client was closed.
 // It returns another error if the underlying connection failed or closed in some way.
 // Client will attempt re-connection upon next Read or Write.
-func (rc *ReconnectingClient) Err() error {
+func (rc *Client) Err() error {
 	rc.connLock.Lock()
 	defer rc.connLock.Unlock()
 	if rc.conn == nil {
@@ -107,7 +107,7 @@ func (rc *ReconnectingClient) Err() error {
 	return context.Cause(rc.conn.CloseCtx())
 }
 
-func (rc *ReconnectingClient) Close() error {
+func (rc *Client) Close() error {
 	rc.reconnectCancel() // stop allowing reconnects
 	// now close the underlying connection
 	rc.connLock.Lock()
