@@ -10,24 +10,27 @@ import (
 )
 
 func TestWebsocket(t *testing.T) {
-	wsSrv := Server{}
+	wsSrv := NewServer(func(c *Connection, meta *ConnectionMetadata) {
+		t.Log("new connection", "origin:", meta.Origin,
+			"remote:", meta.RemoteAddr, "user-agent:", meta.UserAgent)
+	}, func(c *Connection, meta *ConnectionMetadata) {
+		t.Log("closed connection", "origin:", meta.Origin,
+			"remote:", meta.RemoteAddr, "user-agent:", meta.UserAgent,
+			"err:", c.CloseCtx().Err(),
+			"cause:", context.Cause(c.CloseCtx()))
+	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wsSrv.Handle)
 	httpSrv := httptest.NewServer(mux)
 	t.Cleanup(httpSrv.Close)
-	conn, err := Dial(context.Background(), strings.ReplaceAll(httpSrv.URL, "http://", "ws://")+"/ws")
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = conn.Write(websocket.TextMessage, []byte("hello world"))
+	rc := NewReconnectingClient(strings.ReplaceAll(httpSrv.URL, "http://", "ws://") + "/ws")
+	err := rc.Write(TextMessage, []byte("hello world"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	checkedServer := false
-	wsSrv.connections.Range(func(key, value any) bool {
+	wsSrv.Range(func(c *Connection, m *ConnectionMetadata) bool {
 		checkedServer = true
-		c := key.(*Connection)
-		m := value.(*ConnectionMetadata)
 		if m.RemoteAddr == "" {
 			t.Fatal("expected metadata")
 		}
@@ -35,13 +38,13 @@ func TestWebsocket(t *testing.T) {
 		if err != nil {
 			t.Fatal("server failed to read", err)
 		}
-		if typ != websocket.TextMessage {
+		if typ != TextMessage {
 			t.Fatal("unexpected type", typ)
 		}
 		if string(msg) != "hello world" {
 			t.Fatal("unexpected message", string(msg))
 		}
-		err = c.Write(websocket.TextMessage, []byte("server says hi"))
+		err = c.Write(TextMessage, []byte("server says hi"))
 		if err != nil {
 			t.Fatal("server failed to write", err)
 		}
@@ -53,19 +56,18 @@ func TestWebsocket(t *testing.T) {
 	if !checkedServer {
 		t.Fatal("didn't check server")
 	}
-	typ, msg, err := conn.Read()
+	typ, msg, err := rc.Read()
 	if err != nil {
 		t.Fatal("server failed to read", err)
 	}
-	if typ != websocket.TextMessage {
+	if typ != TextMessage {
 		t.Fatal("unexpected type", typ)
 	}
 	if string(msg) != "server says hi" {
 		t.Fatal("unexpected message", string(msg))
 	}
-	_, _, _ = conn.Read()
-	ctx := conn.CloseCtx()
-	cause := context.Cause(ctx)
+	_, _, _ = rc.Read()
+	cause := rc.Err()
 	closeErr, ok := cause.(*websocket.CloseError)
 	if !ok {
 		t.Fatal("not a close error", cause)

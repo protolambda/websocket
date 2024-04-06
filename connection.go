@@ -116,9 +116,11 @@ func (wc *Connection) CloseWithCause(cause error) {
 	})
 }
 
-func (wc *Connection) Read() (messageType int, p []byte, err error) {
+func (wc *Connection) Read() (messageType MessageType, p []byte, err error) {
 	wc.readLock.Lock()
-	messageType, p, err = wc.conn.ReadMessage()
+	var typ int
+	typ, p, err = wc.conn.ReadMessage()
+	messageType = MessageType(typ)
 	wc.readLock.Unlock()
 	if websocket.IsUnexpectedCloseError(err) {
 		wc.CloseWithCause(err)
@@ -126,9 +128,9 @@ func (wc *Connection) Read() (messageType int, p []byte, err error) {
 	return
 }
 
-func (wc *Connection) Write(messageType int, data []byte) error {
+func (wc *Connection) Write(messageType MessageType, data []byte) error {
 	wc.writeLock.Lock()
-	err := wc.conn.WriteMessage(messageType, data)
+	err := wc.conn.WriteMessage(int(messageType), data)
 	wc.writeLock.Unlock()
 	if err == nil {
 		select {
