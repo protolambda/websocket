@@ -8,6 +8,8 @@ Opinionated wrapper around [Gorilla Websocket](https://github.com/gorilla/websoc
 - Provides basic `Server` that maintains the set of active connections and their metadata.
 - Provides a `Dial` function to get a connection to an endpoint as client.
 - Provides a `Client` that handles reconnects.
+- Provides Go typing for websocket message-types.
+- Provides a `Messenger` interface for common client/connection message handling (read/write/close).
 
 ## License
 

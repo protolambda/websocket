@@ -45,6 +45,8 @@ type Client struct {
 	conn     *Connection
 }
 
+var _ Messenger = (*Client)(nil)
+
 func NewClient(endpoint string) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{

@@ -76,12 +76,19 @@ type Connection struct {
 	pingReset chan struct{}
 }
 
+var _ Messenger = (*Connection)(nil)
+
 // CloseCtx returns the context that terminates when the connection closed.
 // The context Cause shares the reason for closure.
 // This may simply be "context.Canceled" if Close() was called.
 // This may be a websocket.CloseError if the connection itself was broken.
 func (wc *Connection) CloseCtx() context.Context {
 	return wc.ctxClose
+}
+
+// Err is a shorthand for the Cause error of the CloseCtx.
+func (wc *Connection) Err() error {
+	return context.Cause(wc.CloseCtx())
 }
 
 // Close closes the connection, if it's not already closed.

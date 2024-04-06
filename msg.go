@@ -1,7 +1,26 @@
 package websocket
 
+import "fmt"
+
 // MessageType is a type-safe enum, replacing the message-types by the underlying gorilla-websocket library.
 type MessageType uint
+
+func (typ MessageType) String() string {
+	switch typ {
+	case TextMessage:
+		return "TEXT"
+	case BinaryMessage:
+		return "BINARY"
+	case CloseMessage:
+		return "CLOSE"
+	case PingMessage:
+		return "PING"
+	case PongMessage:
+		return "PONG"
+	default:
+		return fmt.Sprintf("unknown-type-%d", uint(typ))
+	}
+}
 
 // The message types are defined in RFC 6455, section 11.8.
 const (
@@ -25,3 +44,10 @@ const (
 	// is UTF-8 encoded text.
 	PongMessage MessageType = 10
 )
+
+type Messenger interface {
+	Write(messageType MessageType, data []byte) error
+	Read() (messageType MessageType, p []byte, err error)
+	Close() error
+	Err() error
+}
