@@ -7,7 +7,7 @@ Opinionated wrapper around [Gorilla Websocket](https://github.com/gorilla/websoc
   - Makes awaiting a connection-closure easy with a context, and close-reason with context-cause.
 - Provides basic `Server` that maintains the set of active connections and their metadata.
 - Provides a `Dial` function to get a connection to an endpoint as client.
-- [work in progress] Provides basic `Client` that handles reconnects.
+- Provides a `ReconnectingClient` that handles reconnects.
 
 ## License
 
