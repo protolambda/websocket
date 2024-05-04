@@ -11,9 +11,10 @@ import (
 )
 
 const (
-	pingInterval     = 30 * time.Second
-	pingWriteTimeout = 5 * time.Second
-	pongTimeout      = 30 * time.Second
+	pingInterval        = 30 * time.Second
+	pingWriteTimeout    = 5 * time.Second
+	pongTimeout         = 30 * time.Second
+	defaultWriteTimeout = 10 * time.Second
 )
 
 const (
@@ -65,8 +66,10 @@ type Connection struct {
 
 	conn *websocket.Conn
 
-	// to avoid concurrent writing to the connection
+	// To avoid concurrent writing to the connection.
+	// After acquiring the lock the write-timeout on the connection should be set.
 	writeLock sync.Mutex
+
 	// to avoid
 	readLock sync.Mutex
 
@@ -123,22 +126,36 @@ func (wc *Connection) CloseWithCause(cause error) {
 	})
 }
 
-func (wc *Connection) Read() (messageType MessageType, p []byte, err error) {
+func (wc *Connection) readHelper() (messageType MessageType, p []byte, err error) {
 	wc.readLock.Lock()
+	defer wc.readLock.Unlock()
 	var typ int
 	typ, p, err = wc.conn.ReadMessage()
 	messageType = MessageType(typ)
-	wc.readLock.Unlock()
+	return
+}
+
+// Read reads from the connection.
+// Note: reads on the underlying connection are timed out by the underlying ping-pong message system.
+func (wc *Connection) Read() (messageType MessageType, p []byte, err error) {
+	messageType, p, err = wc.readHelper()
 	if websocket.IsUnexpectedCloseError(err) {
 		wc.CloseWithCause(err)
 	}
 	return
 }
 
-func (wc *Connection) Write(messageType MessageType, data []byte) error {
+func (wc *Connection) writeHelper(messageType MessageType, data []byte) error {
 	wc.writeLock.Lock()
-	err := wc.conn.WriteMessage(int(messageType), data)
-	wc.writeLock.Unlock()
+	defer wc.writeLock.Unlock()
+	deadline := time.Now().Add(defaultWriteTimeout)
+	_ = wc.conn.SetWriteDeadline(deadline)
+	return wc.conn.WriteMessage(int(messageType), data)
+}
+
+// Write writes to the connection.
+func (wc *Connection) Write(messageType MessageType, data []byte) error {
+	err := wc.writeHelper(messageType, data)
 	if err == nil {
 		select {
 		case wc.pingReset <- struct{}{}:

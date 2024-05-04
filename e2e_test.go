@@ -2,23 +2,30 @@ package websocket
 
 import (
 	"context"
-	"github.com/gorilla/websocket"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
+type basicConnData struct {
+	c    *Connection
+	meta *ConnectionMetadata
+}
+
 func TestWebsocket(t *testing.T) {
-	wsSrv := NewServer(func(c *Connection, meta *ConnectionMetadata) {
+	wsSrv := NewServer[*basicConnData](func(c *Connection, meta *ConnectionMetadata) (*basicConnData, error) {
 		t.Log("new connection", "origin:", meta.Origin,
 			"remote:", meta.RemoteAddr, "user-agent:", meta.UserAgent)
-	}, func(c *Connection, meta *ConnectionMetadata) {
-		t.Log("closed connection", "origin:", meta.Origin,
-			"remote:", meta.RemoteAddr, "user-agent:", meta.UserAgent,
-			"err:", c.CloseCtx().Err(),
-			"cause:", context.Cause(c.CloseCtx()))
-	})
+		return &basicConnData{c: c, meta: meta}, nil
+	}, WithOnDisconnect(func(b *basicConnData) {
+		t.Log("closed connection", "origin:", b.meta.Origin,
+			"remote:", b.meta.RemoteAddr, "user-agent:", b.meta.UserAgent,
+			"err:", b.c.CloseCtx().Err(),
+			"cause:", context.Cause(b.c.CloseCtx()))
+	}))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wsSrv.Handle)
 	httpSrv := httptest.NewServer(mux)
@@ -29,12 +36,12 @@ func TestWebsocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkedServer := false
-	wsSrv.Range(func(c *Connection, m *ConnectionMetadata) bool {
+	wsSrv.Range(func(b *basicConnData) bool {
 		checkedServer = true
-		if m.RemoteAddr == "" {
+		if b.meta.RemoteAddr == "" {
 			t.Fatal("expected metadata")
 		}
-		typ, msg, err := c.Read()
+		typ, msg, err := b.c.Read()
 		if err != nil {
 			t.Fatal("server failed to read", err)
 		}
@@ -44,11 +51,11 @@ func TestWebsocket(t *testing.T) {
 		if string(msg) != "hello world" {
 			t.Fatal("unexpected message", string(msg))
 		}
-		err = c.Write(TextMessage, []byte("server says hi"))
+		err = b.c.Write(TextMessage, []byte("server says hi"))
 		if err != nil {
 			t.Fatal("server failed to write", err)
 		}
-		if err := c.Close(); err != nil {
+		if err := b.c.Close(); err != nil {
 			t.Fatal("server failed to close connection")
 		}
 		return false
