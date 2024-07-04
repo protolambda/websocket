@@ -36,6 +36,10 @@ type serverConfig[E any] struct {
 	onDisconnect OnDisconnectFn[E]
 
 	readLimit int64
+
+	checkOrigin func(r *http.Request) bool
+
+	onUpgradeFailed func(r *http.Request, err error)
 }
 
 type ServerOpt[E any] func(c *serverConfig[E])
@@ -49,6 +53,18 @@ func WithOnDisconnect[E any](onDisconnect OnDisconnectFn[E]) ServerOpt[E] {
 func WithReadLimit[E any](readLimit int64) ServerOpt[E] {
 	return func(c *serverConfig[E]) {
 		c.readLimit = readLimit
+	}
+}
+
+func WithCheckOrigin[E any](fn func(r *http.Request) bool) ServerOpt[E] {
+	return func(c *serverConfig[E]) {
+		c.checkOrigin = fn
+	}
+}
+
+func WithOnUpgradeFailed[E any](fn func(r *http.Request, err error)) ServerOpt[E] {
+	return func(c *serverConfig[E]) {
+		c.onUpgradeFailed = fn
 	}
 }
 
@@ -71,10 +87,13 @@ func (s *Server[E]) Handle(w http.ResponseWriter, r *http.Request) {
 		ReadBufferSize:  readBuffer,
 		WriteBufferSize: writeBuffer,
 		WriteBufferPool: bufferPool,
+		CheckOrigin:     s.conf.checkOrigin,
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		//log.Debug("WebSocket upgrade failed", "err", err)
+		if s.conf.onUpgradeFailed != nil {
+			s.conf.onUpgradeFailed(r, err)
+		}
 		return
 	}
 	conn.SetReadLimit(s.conf.readLimit)
