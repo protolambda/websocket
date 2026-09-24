@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -99,6 +100,7 @@ type dialConfig struct {
 	conn             connConfig
 	header           http.Header
 	handshakeTimeout time.Duration
+	proxy            func(req *http.Request) (*url.URL, error)
 }
 
 func newDialConfig(opts []DialOpt) dialConfig {
@@ -137,6 +139,28 @@ func WithHeader(h http.Header) DialOpt {
 		for k, vs := range h {
 			c.header[http.CanonicalHeaderKey(k)] = vs
 		}
+	})
+}
+
+// WithProxy makes Dial connect through a proxy, e.g. to reach the endpoint from a network that requires one,
+// or to hide the network address of the client from the endpoint.
+// By default, Dial connects directly, and ignores the proxy environment variables.
+//
+// fn is called for every dial, with the handshake request. Its URL has the scheme http for a ws:// endpoint,
+// and https for a wss:// endpoint. fn returns the URL of the proxy, or nil to connect directly. For example:
+//   - http.ProxyFromEnvironment uses the proxy of the HTTP_PROXY or HTTPS_PROXY environment variable,
+//     unless NO_PROXY excludes the host. It never proxies localhost or loopback addresses,
+//     and reads the environment only once per process.
+//   - http.ProxyURL(u) uses the proxy u for every endpoint.
+//
+// The proxy URL scheme may be http, for a tunnel with HTTP CONNECT (with basic authentication if the URL has
+// a user and password), or socks5, which resolves host names at the proxy. Other schemes fail the dial.
+// The proxy sees the host and port of the endpoint. With a ws:// endpoint it can also read and change
+// the messages; with a wss:// endpoint, TLS runs through the tunnel, between the client and the endpoint.
+// A nil fn connects directly.
+func WithProxy(fn func(req *http.Request) (*url.URL, error)) DialOpt {
+	return dialOptFn(func(c *dialConfig) {
+		c.proxy = fn
 	})
 }
 

@@ -18,7 +18,9 @@ Opinionated wrapper around [Gorilla Websocket](https://github.com/gorilla/websoc
 Options:
 - Connection options, for `Dial`, `NewClient`, and `NewServer` (with `WithConnOpts`):
   `WithPingInterval`, `WithPongTimeout`, `WithWriteTimeout`, `WithCloseTimeout`, `WithReadLimit`, `WithCompression`.
-- Dial options: `WithHeader` (e.g. `Origin` or `Authorization`), `WithHandshakeTimeout`.
+- Dial options: `WithHeader` (e.g. `Origin` or `Authorization`), `WithHandshakeTimeout`,
+  `WithProxy` (e.g. `http.ProxyFromEnvironment`, or `http.ProxyURL(u)` for an `http://` or `socks5://` proxy).
+  `Dial` connects directly by default: it ignores the proxy environment variables unless `WithProxy` says otherwise.
 - Server options: `WithOnDisconnect`, `WithCheckOrigin`, `WithOnUpgradeFailed`.
 
 See the Go documentation of `Connection` for the concurrency and liveness contract.

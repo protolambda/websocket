@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -14,7 +13,7 @@ import (
 // Dial opens a websocket connection to the endpoint, a ws:// or wss:// URL.
 // The context bounds the dial, including the handshake: canceling it aborts the dial.
 // It does not affect the returned connection.
-// Proxies are taken from the environment (HTTP_PROXY, HTTPS_PROXY, NO_PROXY).
+// It connects directly, unless WithProxy is given.
 func Dial(ctx context.Context, endpoint string, opts ...DialOpt) (*Connection, error) {
 	cfg := newDialConfig(opts)
 	var abort dialAborter
@@ -28,7 +27,7 @@ func Dial(ctx context.Context, endpoint string, opts ...DialOpt) (*Connection, e
 			abort.watch(ctx, conn)
 			return conn, nil
 		},
-		Proxy:             http.ProxyFromEnvironment,
+		Proxy:             cfg.proxy,
 		HandshakeTimeout:  cfg.handshakeTimeout,
 		ReadBufferSize:    readBuffer,
 		WriteBufferSize:   writeBuffer,

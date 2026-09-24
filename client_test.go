@@ -3,9 +3,14 @@ package websocket
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -41,6 +46,90 @@ func listenSilent(t *testing.T) string {
 	return "ws://" + ln.Addr().String()
 }
 
+// serveEcho serves connections that echo every message, and returns the websocket URL.
+func serveEcho(t *testing.T) string {
+	t.Helper()
+	srv := NewServer(func(c *Connection, meta *ConnectionMetadata) (struct{}, error) {
+		go func() {
+			for {
+				typ, data, err := c.Read()
+				if err != nil || c.Write(typ, data) != nil {
+					return
+				}
+			}
+		}()
+		return struct{}{}, nil
+	})
+	return serve(t, srv)
+}
+
+// serveConnectProxy serves an HTTP CONNECT proxy, and returns its URL and the number of tunnels it opened.
+func serveConnectProxy(t *testing.T) (*url.URL, *atomic.Int64) {
+	t.Helper()
+	var tunnels atomic.Int64
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			http.Error(w, "CONNECT only", http.StatusMethodNotAllowed)
+			return
+		}
+		target, err := net.Dial("tcp", r.Host)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer target.Close()
+		client, rw, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error("failed to hijack", err)
+			return
+		}
+		defer client.Close()
+		tunnels.Add(1)
+		if _, err := io.WriteString(client, "HTTP/1.1 200 Connection established\r\n\r\n"); err != nil {
+			return
+		}
+		done := make(chan struct{}, 2)
+		go func() {
+			_, _ = io.Copy(target, rw.Reader)
+			done <- struct{}{}
+		}()
+		go func() {
+			_, _ = io.Copy(client, target)
+			done <- struct{}{}
+		}()
+		<-done
+	}))
+	t.Cleanup(proxy.Close)
+	proxyURL, err := url.Parse(proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return proxyURL, &tunnels
+}
+
+func TestProxy(t *testing.T) {
+	t.Parallel()
+	proxyURL, tunnels := serveConnectProxy(t)
+	var scheme atomic.Value
+	conn := dial(t, serveEcho(t), WithProxy(func(req *http.Request) (*url.URL, error) {
+		scheme.Store(req.URL.Scheme)
+		return proxyURL, nil
+	}))
+	if err := conn.Write(TextMessage, []byte("via proxy")); err != nil {
+		t.Fatal("failed to write", err)
+	}
+	msg := await(t, readAsync(conn))
+	if msg.err != nil || string(msg.data) != "via proxy" {
+		t.Fatal("unexpected echo", string(msg.data), msg.err)
+	}
+	if n := tunnels.Load(); n != 1 {
+		t.Fatal("expected one tunnel", n)
+	}
+	if got := scheme.Load(); got != "http" {
+		t.Fatal("expected http scheme for a ws endpoint", got)
+	}
+}
+
 func TestDialAbort(t *testing.T) {
 	t.Parallel()
 	t.Run("cancel", func(t *testing.T) {
@@ -69,6 +158,20 @@ func TestDialAbort(t *testing.T) {
 			t.Fatal("expected handshake timeout")
 		}
 	})
+	t.Run("proxy", func(t *testing.T) {
+		t.Parallel()
+		proxyURL := &url.URL{Scheme: "http", Host: strings.TrimPrefix(listenSilent(t), "ws://")}
+		ctx, cancel := context.WithCancel(t.Context())
+		time.AfterFunc(50*time.Millisecond, cancel)
+		result := make(chan error, 1)
+		go func() {
+			_, err := Dial(ctx, "ws://endpoint.invalid", WithProxy(http.ProxyURL(proxyURL)))
+			result <- err
+		}()
+		if err := await(t, result); !errors.Is(err, context.Canceled) {
+			t.Fatal("expected canceled dial", err)
+		}
+	})
 	t.Run("client close", func(t *testing.T) {
 		t.Parallel()
 		rc := NewClient(listenSilent(t))
@@ -89,17 +192,8 @@ func TestDialAbort(t *testing.T) {
 // TestDialContextAfterDial checks that the context of Dial does not affect the connection after the dial.
 func TestDialContextAfterDial(t *testing.T) {
 	t.Parallel()
-	srv := NewServer(func(c *Connection, meta *ConnectionMetadata) (struct{}, error) {
-		go func() {
-			typ, data, err := c.Read()
-			if err == nil {
-				_ = c.Write(typ, data)
-			}
-		}()
-		return struct{}{}, nil
-	})
 	ctx, cancel := context.WithCancel(t.Context())
-	conn, err := Dial(ctx, serve(t, srv))
+	conn, err := Dial(ctx, serveEcho(t))
 	if err != nil {
 		t.Fatal("failed to dial", err)
 	}
