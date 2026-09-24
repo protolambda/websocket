@@ -6,9 +6,101 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
+
+// serve serves srv with a test HTTP server, and returns its websocket URL.
+func serve[E any](t *testing.T, srv *Server[E]) string {
+	t.Helper()
+	httpSrv := httptest.NewServer(http.HandlerFunc(srv.Handle))
+	t.Cleanup(func() {
+		srv.Close()
+		httpSrv.Close()
+	})
+	return "ws" + strings.TrimPrefix(httpSrv.URL, "http")
+}
+
+// serveGorilla serves plain Gorilla connections, and returns the websocket URL.
+// The connection is closed when fn returns.
+func serveGorilla(t *testing.T, fn func(conn *websocket.Conn)) string {
+	t.Helper()
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var upgrader websocket.Upgrader
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Error("failed to upgrade", err)
+			return
+		}
+		defer conn.Close()
+		fn(conn)
+	}))
+	t.Cleanup(httpSrv.Close)
+	return "ws" + strings.TrimPrefix(httpSrv.URL, "http")
+}
+
+// dial dials the URL, and closes the connection when the test ends.
+func dial(t *testing.T, url string, opts ...DialOpt) *Connection {
+	t.Helper()
+	conn, err := Dial(t.Context(), url, opts...)
+	if err != nil {
+		t.Fatal("failed to dial", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	return conn
+}
+
+// readMsg is the result of a Read.
+type readMsg struct {
+	typ  MessageType
+	data []byte
+	err  error
+}
+
+// readAsync reads the next message in the background.
+func readAsync(m Messenger) <-chan readMsg {
+	out := make(chan readMsg, 1)
+	go func() {
+		typ, data, err := m.Read()
+		out <- readMsg{typ: typ, data: data, err: err}
+	}()
+	return out
+}
+
+// await returns the next value of ch, or fails the test after 5 seconds.
+func await[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out")
+		var zero T
+		return zero
+	}
+}
+
+// waitFor polls cond until it holds, or fails the test after 5 seconds.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// readLoop reads from c until it fails. A server reads to answer the pings of its peer.
+func readLoop(c *Connection) {
+	for {
+		if _, _, err := c.Read(); err != nil {
+			return
+		}
+	}
+}
 
 type basicConnData struct {
 	c    *Connection
@@ -16,6 +108,7 @@ type basicConnData struct {
 }
 
 func TestWebsocket(t *testing.T) {
+	t.Parallel()
 	wsSrv := NewServer[*basicConnData](func(c *Connection, meta *ConnectionMetadata) (*basicConnData, error) {
 		t.Log("new connection", "origin:", meta.Origin,
 			"remote:", meta.RemoteAddr, "user-agent:", meta.UserAgent)
@@ -26,15 +119,14 @@ func TestWebsocket(t *testing.T) {
 			"err:", b.c.CloseCtx().Err(),
 			"cause:", context.Cause(b.c.CloseCtx()))
 	}))
-	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", wsSrv.Handle)
-	httpSrv := httptest.NewServer(mux)
-	t.Cleanup(httpSrv.Close)
-	rc := NewClient(strings.ReplaceAll(httpSrv.URL, "http://", "ws://") + "/ws")
+	rc := NewClient(serve(t, wsSrv))
+	t.Cleanup(func() { _ = rc.Close() })
 	err := rc.Write(TextMessage, []byte("hello world"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The server registers the connection after the handshake.
+	waitFor(t, func() bool { return wsSrv.Count() == 1 })
 	checkedServer := false
 	wsSrv.Range(func(b *basicConnData) bool {
 		checkedServer = true
