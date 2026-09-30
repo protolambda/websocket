@@ -2,9 +2,11 @@ package websocket
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +22,56 @@ func serve[E any](t *testing.T, srv *Server[E]) string {
 		httpSrv.Close()
 	})
 	return "ws" + strings.TrimPrefix(httpSrv.URL, "http")
+}
+
+// wireCount counts the bytes a server read from and wrote to the network, handshakes included.
+type wireCount struct {
+	read, written atomic.Int64
+}
+
+// countingListener counts the bytes of the connections it accepts.
+type countingListener struct {
+	net.Listener
+	count *wireCount
+}
+
+func (l countingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return countingConn{Conn: conn, count: l.count}, nil
+}
+
+type countingConn struct {
+	net.Conn
+	count *wireCount
+}
+
+func (c countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.count.read.Add(int64(n))
+	return n, err
+}
+
+func (c countingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.count.written.Add(int64(n))
+	return n, err
+}
+
+// serveCounted is serve, and also returns the bytes the server read from and wrote to the network.
+func serveCounted[E any](t *testing.T, srv *Server[E]) (string, *wireCount) {
+	t.Helper()
+	count := new(wireCount)
+	httpSrv := httptest.NewUnstartedServer(http.HandlerFunc(srv.Handle))
+	httpSrv.Listener = countingListener{Listener: httpSrv.Listener, count: count}
+	httpSrv.Start()
+	t.Cleanup(func() {
+		srv.Close()
+		httpSrv.Close()
+	})
+	return "ws" + strings.TrimPrefix(httpSrv.URL, "http"), count
 }
 
 // serveGorilla serves plain Gorilla connections, and returns the websocket URL.
