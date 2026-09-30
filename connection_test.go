@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -125,9 +126,15 @@ func TestPingFailureCloses(t *testing.T) {
 func TestCloseStalledWrite(t *testing.T) {
 	t.Parallel()
 	url := serveGorilla(t, func(conn *websocket.Conn) {
+		// Small socket buffers, on both sides, so that the writes stall after a few KiB on any machine. With the
+		// buffers that the kernel sizes itself (several MiB), a slow machine (e.g. with the race detector, which
+		// makes masking the client's frames slow) keeps writing through the whole test, and the close message goes
+		// out between two frames.
+		setBuffer(t, conn.NetConn(), (*net.TCPConn).SetReadBuffer)
 		<-t.Context().Done()
 	})
 	conn := dial(t, url, WithWriteTimeout(0), WithPingInterval(10*time.Millisecond), WithCloseTimeout(50*time.Millisecond))
+	setBuffer(t, conn.conn.NetConn(), (*net.TCPConn).SetWriteBuffer)
 	var writes atomic.Int64
 	go func() {
 		msg := make([]byte, 1<<20)
@@ -135,10 +142,17 @@ func TestCloseStalledWrite(t *testing.T) {
 			writes.Add(1)
 		}
 	}()
-	// Stalled once the socket buffers are full.
-	for last := int64(-1); last != writes.Load(); {
-		last = writes.Load()
-		time.Sleep(100 * time.Millisecond)
+	// Stalled once the socket buffers are full. A pause of the writes alone does not prove it, so a ping must not get
+	// through within 200ms either: the stalled writer holds the connection's write lock without a deadline.
+	for stalled := false; !stalled; {
+		for last := int64(-1); last != writes.Load(); {
+			last = writes.Load()
+			time.Sleep(100 * time.Millisecond)
+		}
+		stalled = conn.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(200*time.Millisecond)) != nil
+		if t.Context().Err() != nil {
+			t.Fatal("the writes did not stall")
+		}
 	}
 	closed := make(chan error, 1)
 	go func() {
@@ -146,6 +160,18 @@ func TestCloseStalledWrite(t *testing.T) {
 	}()
 	if err := await(t, closed); err == nil {
 		t.Fatal("expected close message to fail")
+	}
+}
+
+// setBuffer sets a socket buffer of the TCP connection c to 4 KiB with set.
+func setBuffer(t *testing.T, c net.Conn, set func(*net.TCPConn, int) error) {
+	t.Helper()
+	tcp, ok := c.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("not a TCP connection: %T", c)
+	}
+	if err := set(tcp, 4<<10); err != nil {
+		t.Fatal("failed to set the socket buffer:", err)
 	}
 }
 
