@@ -68,9 +68,13 @@ func WithWriteTimeout(d time.Duration) ConnOpt {
 	}
 }
 
-// WithCloseTimeout bounds the writing of the close message, when the connection is closed gracefully.
+// WithCloseTimeout bounds the writing of the close message, when the connection is closed gracefully,
+// and when a decompressed message exceeds the read limit.
 // A peer that does not read delays each close by this timeout.
-// Zero or negative closes without a close message. The default is 1 second.
+// Zero or negative closes without these close messages. The default is 1 second.
+//
+// The Gorilla library writes its own close messages within 1 second, whatever the close timeout:
+// to answer the close message of the peer, on a protocol error, and for frames beyond the read limit.
 func WithCloseTimeout(d time.Duration) ConnOpt {
 	return func(c *connConfig) {
 		c.closeTimeout = max(d, 0)
@@ -79,6 +83,17 @@ func WithCloseTimeout(d time.Duration) ConnOpt {
 
 // WithReadLimit sets the maximum size of a message from the peer, in bytes.
 // A larger message fails the Read with websocket.ErrReadLimit (of the Gorilla library), and closes the connection.
+//
+// The limit applies to the message after decompression, so it bounds the memory a Read allocates for a message,
+// also with per-message compression (see WithCompression). The frames on the network are limited too:
+// with compression, a message also fails if its compressed form exceeds the limit,
+// which a common compressor only causes for a message close to the limit that does not compress.
+//
+// Before closing, the connection sends the peer a close message with status 1009 (message too big).
+// The Gorilla library rejects frames beyond the limit, and writes that close message within 1 second.
+// A message beyond the limit only after decompression is rejected by this package, which writes the close message
+// within the close timeout, and skips it if the close timeout is zero (see WithCloseTimeout).
+//
 // Zero or negative removes the limit. The default is 32 MiB.
 func WithReadLimit(limit int64) ConnOpt {
 	return func(c *connConfig) {
@@ -88,6 +103,12 @@ func WithReadLimit(limit int64) ConnOpt {
 
 // WithCompression enables or disables per-message compression (RFC 7692), which is used if both peers enable it.
 // Dial and NewClient enable it by default; a Server disables it by default.
+// The read limit applies to the decompressed messages (see WithReadLimit).
+//
+// With compression, the size of a message on the network depends on its content. An observer of the network
+// who can also put data of its choosing into a message that holds a secret may learn the secret from the sizes
+// (the CRIME class of attacks, see the security considerations of RFC 7692).
+// Disable compression on connections that carry such messages.
 // The Gorilla library marks its compression support as experimental.
 func WithCompression(enabled bool) ConnOpt {
 	return func(c *connConfig) {

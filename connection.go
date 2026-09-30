@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -57,8 +59,9 @@ func newConnection(conn *websocket.Conn, cfg connConfig) *Connection {
 // as are concurrent Write calls. Close, CloseWithCause, Err, CloseCtx and the address methods
 // may be called from any goroutine.
 //
-// Any error of Read or Write closes the connection, and becomes the cause of the closure (see Err).
-// Read and Write on a closed connection return that cause.
+// Any error of Read or Write closes the connection, and becomes the cause of the closure (see Err),
+// unless the connection is already closing. Read and Write on a closed connection return that cause;
+// a Write while the connection closes waits for the closure, and returns it too.
 //
 // The connection owns a keepalive goroutine, which sends a ping when nothing was received from the peer
 // for the ping interval (see WithPingInterval). The goroutine stops when the connection closes,
@@ -90,6 +93,8 @@ type Connection struct {
 	// To avoid concurrent writing to the connection.
 	// After acquiring the lock the write-timeout on the connection should be set.
 	writeLock sync.Mutex
+	// closeWritten tells whether the application sent a close message with Write. Guarded by writeLock.
+	closeWritten bool
 
 	// To avoid concurrent reading from the connection.
 	// Only the holder of the lock may change the read deadline.
@@ -168,6 +173,7 @@ func (c *Connection) CloseWithCause(cause error) {
 // Read reads the next message from the connection.
 // Pings and pongs from the peer are handled while reading, and are not returned.
 // If the peer closed the connection, the error is a websocket.CloseError (of the Gorilla library).
+// A message beyond the read limit fails with websocket.ErrReadLimit (see WithReadLimit).
 func (c *Connection) Read() (messageType MessageType, p []byte, err error) {
 	c.readLock.Lock()
 	defer c.readLock.Unlock()
@@ -176,7 +182,7 @@ func (c *Connection) Read() (messageType MessageType, p []byte, err error) {
 	}
 	// The peer has until the deadline to send something; it is extended by every message, ping or pong.
 	c.extendReadDeadline()
-	typ, p, err := c.conn.ReadMessage()
+	typ, p, err := c.readMessage()
 	if err != nil {
 		if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
 			err = fmt.Errorf("%w: %w", ErrPongTimeout, err)
@@ -188,7 +194,44 @@ func (c *Connection) Read() (messageType MessageType, p []byte, err error) {
 	return MessageType(typ), p, nil
 }
 
+// readMessage reads the next message, within the read limit.
+//
+// The Gorilla library limits the frames of a message, which hold the compressed message when the peer uses
+// per-message compression: a message within the limit on the network may inflate far beyond it.
+// So the message is limited again here, as it is decompressed. Without compression, the frame limit is the same,
+// and applies first.
+func (c *Connection) readMessage() (int, []byte, error) {
+	typ, r, err := c.conn.NextReader()
+	if err != nil {
+		return 0, nil, err
+	}
+	limit := c.cfg.readLimit
+	if limit <= 0 {
+		p, err := io.ReadAll(r)
+		return typ, p, err
+	}
+	// Reading one byte more than the limit tells whether the message exceeds it; min keeps that from overflowing.
+	p, err := io.ReadAll(io.LimitReader(r, min(limit, math.MaxInt64-1)+1))
+	if err != nil {
+		return 0, nil, err
+	}
+	if int64(len(p)) > limit {
+		// Like the Gorilla library does for frames beyond the limit: tell the peer why the connection closes.
+		if c.cfg.closeTimeout > 0 {
+			msg := websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "")
+			_ = c.conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(c.cfg.closeTimeout))
+		}
+		return 0, nil, fmt.Errorf("decompressed message exceeds %d bytes: %w", limit, websocket.ErrReadLimit)
+	}
+	return typ, p, nil
+}
+
 // Write writes a message to the connection, within the write timeout (see WithWriteTimeout).
+//
+// Read and CloseWithCause send a close message to the peer before they close the connection. A Write in between
+// waits until the connection is closed, and returns the cause of the closure.
+// After a close message of the application (a CloseMessage written with Write), Write fails with
+// websocket.ErrCloseSent (of the Gorilla library), which closes the connection like any other error.
 func (c *Connection) Write(messageType MessageType, data []byte) error {
 	c.writeLock.Lock()
 	defer c.writeLock.Unlock()
@@ -196,11 +239,22 @@ func (c *Connection) Write(messageType MessageType, data []byte) error {
 		return c.Err()
 	}
 	_ = c.conn.SetWriteDeadline(c.writeDeadline())
-	if err := c.conn.WriteMessage(int(messageType), data); err != nil {
+	err := c.conn.WriteMessage(int(messageType), data)
+	switch {
+	case err == nil:
+		if messageType == CloseMessage {
+			c.closeWritten = true
+		}
+		return nil
+	case errors.Is(err, websocket.ErrCloseSent) && !c.closeWritten:
+		// Read (also within the Gorilla library) and CloseWithCause send a close message, and then close the
+		// connection with the actual cause, which ErrCloseSent must not replace.
+		<-c.ctxClose.Done()
+		return c.Err()
+	default:
 		c.CloseWithCause(err)
 		return c.Err()
 	}
-	return nil
 }
 
 // writeDeadline returns the deadline of a write that starts now. The zero time means no deadline.
@@ -253,7 +307,8 @@ func (c *Connection) pingLoop() error {
 		}
 		err := c.conn.WriteControl(websocket.PingMessage, nil, c.writeDeadline())
 		if errors.Is(err, websocket.ErrCloseSent) {
-			// The application sent a close message, and awaits the answer of the peer.
+			// The application sent a close message, and awaits the answer of the peer,
+			// or Read or CloseWithCause sent one, and close the connection.
 			return nil
 		}
 		if err != nil {
